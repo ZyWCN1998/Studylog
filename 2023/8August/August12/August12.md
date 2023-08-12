@@ -1,195 +1,476 @@
-# 20230812 High-Performance Analog Circuit Design Lecture 12 Output Stage
+# 20230812 Learn C the Hardway 17 04
 
-之前的设计主要集中在输入级的设计上，现在来看一下输出级
+按教材输入程序，运行，并查看结果
 
-# 1. 单端输出
+```c
+#include <assert.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-差分输入→单端输出
+#define MAX_DATA 512
+#define MAX_ROWS 100
 
-使用电流镜来实现输出，起到了差分转单端的作用
+struct Address {
+  int id;
+  int set;
+  char name[MAX_DATA];
+  char email[MAX_DATA];
+};
 
-![Untitled](IMAGE/Untitled.png)
+struct Database {
+  struct Address rows[MAX_ROWS];
+};
 
-Half of the output current comes directly from the differential pair, the other half goes through a current mirror with finite bandwidth→**Pole-Zero doublet**
+struct Connection {
+  FILE *file;
+  struct Database *db;
+};
 
-$$
-i_o=g_mv_{id}(\frac{1}{2}+\frac{1}{2}\frac{1}{1-\frac{s}{p}})\\=g_mv_{id}\frac{1-\frac{s}{2p}}{1-\frac{s}{p}}
-$$
+void die(const char *message) {
+  if (errno) {
+    perror(message);
+  } else {
+    printf("ERROR: %s\n", message);
+  }
+  exit(1);
+}
 
-有电流的交汇，就会有零点的产生→差分转单端的电流镜导致了一个零点和一个极点的产生
+void Address_print(struct Address *addr) {
+  printf("%d %s %s\n", addr->id, addr->name, addr->email);
+}
 
-## 1.1 单位增益buffer
+void Database_load(struct Connection *conn) {
+  int rc = fread(conn->db, sizeof(struct Database), 1, conn->file);
+  if (rc != 1)
+    die("Failed to load database");
+}
 
-利用差分转单端实现一个差分输入单端输出的单位增益buffer
+struct Connection *Database_open(const char *filename, char mode) {
+  struct Connection *conn = malloc(sizeof(struct Connection));
+  if (!conn)
+    die("Memory error");
 
-<aside>
-💡 最好的单位增益电路，差分输入单端输出
+  conn->db = malloc(sizeof(struct Database));
+  if (!conn->db)
+    die("Memory error");
 
-</aside>
+  if (mode == 'c') {
+    conn->file = fopen(filename, "w");
 
-![Untitled](IMAGE/Untitled%201.png)
+  } else {
+    conn->file = fopen(filename, "r+");
 
-- 闭环环路增益为1
-- 输出阻抗为$1/g_m$
-- **输出范围等于共模输入范围**
-    - 使用folded-Cascode实现较宽的输入范围
+    if (conn->file) {
+      Database_load(conn);
+    }
+  }
+  if (!conn->file)
+    die("Failed to open the file");
+  return conn;
+}
 
-## 1.2 反向放大器
+void Database_close(struct Connection *conn) {
+  if (conn) {
+    if (conn->file)
+      fclose(conn->file);
+    if (conn->db)
+      free(conn->db);
+    free(conn);
+  }
+}
 
-输入极性是与输出相反的
+void Database_write(struct Connection *conn) {
+  rewind(conn->file);
 
-- 输入动态范围较大，DC量与共模相同
-- β会变小
-- Note that $C_x$ is nontrivial to calculate due to asymmetry
+  int rc = fwrite(conn->db, sizeof(struct Database), 1, conn->file);
+  if (rc != 1)
+    die("Failed to write database.");
 
-![Untitled](IMAGE/Untitled%202.png)
+  rc = fflush(conn->file);
+  if (rc == -1)
+    die("Cannot flush database");
+}
 
-利用两级放大器将输入特性与输出特性去耦合
+void Database_create(struct Connection *conn) {
+  int i = 0;
 
-- 第一级，单端转差分的五管
-- 第二级，单端的CS stage
+  for (i = 0; i < MAX_ROWS; i++) {
+    // make a prototype to initialize it
+    struct Address addr = {.id = i, .set = 0};
+    // then just assign it
+    conn->db->rows[i] = addr;
+  }
+}
 
-![Untitled](IMAGE/Untitled%203.png)
+void Database_set(struct Connection *conn, int id, const char *name,
+                  const char *email) {
+  struct Address *addr = &conn->db->rows[id];
+  if (addr->set)
+    die("Already set, delete it first");
 
-![Untitled](IMAGE/Untitled%204.png)
+  addr->set = 1;
+  // WARNING:bug, read the "How To Break It" and fix this
+  char *res = strncpy(addr->name, name, MAX_DATA);
+  // demonstrate the strncpy bug
+  if (!res)
+    die("Name copy failed");
 
-以上电路会引入一个offset：M3，M4，M6如果W/L相同，才能输出一个同样的共模电平，但大多数时候两级的宽长比并不相同。为了能达到输出共模，则输入相当于天生多了个偏置→系统offset
+  res = strncpy(addr->email, email, MAX_DATA);
+  if (!res)
+    die("Email copy failed");
+}
 
-五管的上面两个管子只提供了$r_o$和噪声，而没有提供$g_m$。
+void Database_get(struct Connection *conn, int id) {
+  struct Address *addr = &conn->db->rows[id];
 
-消耗了功耗而没有提供增益→进一步提高能效
+  if (addr->set) {
+    Address_print(addr);
+  } else {
+    die("ID is not set");
+  }
+}
 
-- 可以第一级使用两个反相器类型的放大器，第二级完成差分转单端的任务
+void Database_delete(struct Connection *conn, int id) {
+  struct Address addr = {.id = id, .set = 0};
+  conn->db->rows[id] = addr;
+}
 
-# 2. 输出级
+void Database_list(struct Connection *conn) {
+  int i = 0;
+  struct Database *db = conn->db;
 
-- 需要能够驱动电阻负载（低电阻）
-    - 连续时间的RC滤波器
-    - 片外电阻负载
-    - 线缆驱动器
-        - E.g. 双绞线（网线，ISDN，ADSL）
-- Solutions
-    - 使用OTA+源跟随器
-        - 输出摆幅受限
-    - 使用OTA+低增益共源极
-        - 牺牲掉某一级$g_m\cdot R_L\approx1$
-        - $20mS\cdot50 \Omega=1, I_{BIAS}=20mS\cdot10V^{-1}=2mA$
-    - 其他输出级（下面讨论）
+  for (i = 0; i < MAX_ROWS; i++) {
+    struct Address *cur = &db->rows[i];
+
+    if (cur->set) {
+      Address_print(cur);
+    }
+  }
+}
+
+int main(int argc, char *argv[]) {
+
+  if (argc < 3)
+    die("USAGE: ex17 <dbfile><action> [action params]");
+  char *filename = argv[1];
+  char action = argv[2][0];
+  struct Connection *conn = Database_open(filename, action);
+  int id = 0;
+
+  if (argc > 3)
+    id = atoi(argv[3]);
+  if (id >= MAX_ROWS)
+    die("There is not many records. ");
+
+  switch (action) {
+  case 'c':
+    Database_create(conn);
+    Database_write(conn);
+    break;
+  case 'g':
+    if (argc != 4)
+      die("Need an id to get");
+
+    Database_get(conn, id);
+    break;
+  case 's':
+    if (argc != 6)
+      die("Need id, name, email to set. ");
+
+    Database_set(conn, id, argv[4], argv[5]);
+    Database_write(conn);
+    break;
+  case 'd':
+    if (argc != 4)
+      die("Need id to delete. ");
+
+    Database_delete(conn, id);
+    Database_write(conn);
+    break;
+  case 'l':
+    Database_list(conn);
+    break;
+  default:
+    die("Invaild action: c=create, g=get, s=set, d=del, l=list");
+  }
+  Database_close(conn);
+
+  return 0;
+}
+```
+
+实现了一个简单的数据库
+
+```bash
+❯ make
+cc -Wall -g    lecture17.c   -o lecture17
+
+❯ ./lecture17 db.dat c
+
+❯ ./lecture17 db.dat s 1 zed zed@shaw.com
+
+❯ ./lecture17 db.dat s 2 frank frank@zedshaw.com
+
+❯ ./lecture17 db.dat s 3 joe joe@zedshaw.com
+
+❯ ./lecture17 db.dat 1
+ERROR: Invaild action: c=create, g=get, s=set, d=del, l=list
+
+❯ ./lecture17 db.dat l
+1 zed zed@shaw.com
+2 frank frank@zedshaw.com
+3 joe joe@zedshaw.com
+
+❯ ./lecture17 db.dat d3
+ERROR: Need id to delete.
+
+❯ ./lecture17 db.dat d 3
+
+❯ ./lecture17 db.dat l
+1 zed zed@shaw.com
+2 frank frank@zedshaw.com
+
+❯ ./lecture17 db.dat g 2
+2 frank frank@zedshaw.com
+```
+
+# 破坏程序
+
+你可以在很多地方破坏这个程序，试试下面这些，也自己想一些出来。
+
+- 经典的方法是删除一些安全检查，这样你就可以传入任意数据。例如，删除第171行防止输入任意记录数据的检查
     
-    ![Untitled](IMAGE/Untitled%205.png)
+    ```c
+    #include <assert.h>
+    #include <errno.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
     
-    ![Untitled](IMAGE/Untitled%206.png)
+    #define MAX_DATA 512
+    #define MAX_ROWS 100
     
-    ### A：全导通
+    struct Address {
+      int id;
+      int set;
+      char name[MAX_DATA];
+      char email[MAX_DATA];
+    };
     
-    ![Untitled](IMAGE/Untitled%207.png)
+    struct Database {
+      struct Address rows[MAX_ROWS];
+    };
     
-    ### B：导通50%
+    struct Connection {
+      FILE *file;
+      struct Database *db;
+    };
     
-    ![Untitled](IMAGE/Untitled%208.png)
+    void die(const char *message) {
+      if (errno) {
+        perror(message);
+      } else {
+        printf("ERROR: %s\n", message);
+      }
+      exit(1);
+    }
     
-    ### AB：介于AB之间，略微提升线性度
+    void Address_print(struct Address *addr) {
+      printf("%d %s %s\n", addr->id, addr->name, addr->email);
+    }
     
-    用diode模拟，输出摆幅受限
+    void Database_load(struct Connection *conn) {
+      int rc = fread(conn->db, sizeof(struct Database), 1, conn->file);
+      if (rc != 1)
+        die("Failed to load database");
+    }
     
-    ![Untitled](IMAGE/Untitled%209.png)
+    struct Connection *Database_open(const char *filename, char mode) {
+      struct Connection *conn = malloc(sizeof(struct Connection));
+      if (!conn)
+        die("Memory error");
     
-    C：谐波导通
+      conn->db = malloc(sizeof(struct Database));
+      if (!conn->db)
+        die("Memory error");
     
-
-在Class-AB的基础上进行修正
-
-### Class G
-
-提升功耗：改V
-
-![Untitled](IMAGE/Untitled%2010.png)
-
-### Class D
-
-或者改I，让管子处于线性区
-
-![Untitled](IMAGE/Untitled%2011.png)
-
-Class AB 输出级：可以很好地偏置M25和M26
-
-![Untitled](IMAGE/Untitled%2012.png)
-
-轨道轨输入+轨道轨输出
-
-Folded Cascode：N input pair与P input pair cover整个范围
-
-![Untitled](IMAGE/Untitled%2013.png)
-
-低电压版本
-
-![Untitled](IMAGE/Untitled%2014.png)
-
-![Untitled](IMAGE/Untitled%2015.png)
-
----
-
-# 偏置电流
-
-# 1. 偏置电流的产生
-
-构建对电源不敏感的偏置体系
-
-![Untitled](IMAGE/Untitled%2016.png)
-
-$$
-I_{OUT }\approx I_{IN}=\frac{V_{DD}-V_t-V_{OV}}{R}
-$$
-
-利用VDD直接产生电流，但随着VDD变化较大，VDD变化则产生的电流（偏置电流）会直接发生变化→电流和VDD直接线性相关。
-
-观察上面这种偏置方式，可以发现M1的Vgs基本不随电流的变化→能否使用这个电压直接除电阻来产生一个偏压
-
-![Untitled](IMAGE/Untitled%2017.png)
-
-$$
-I_{OUT}=\frac{V_{GS1}}{R_2}\approx\frac{V_t+V_{OV}}{R_2}\approx \frac{V_t+\sqrt{\frac{2I_{IN}}{\mu C_{ox}\frac{W}{L}}}}{R_2}
-$$
-
-- 通过使用特别宽的MOS管，我们可以使$V_{OV}<<V_t$，来达到
-
-$$
-I_{OUT}\approx\frac{V_t}{R_2}
-$$
-
-这种情况下的敏感度
-
-![Untitled](IMAGE/Untitled%2018.png)
-
-## BJT版本
-
-![Untitled](IMAGE/Untitled%2019.png)
-
-使用BJT能使进一步随着温度变化进一步降低
-
-$$
-I_{OUT}=\frac{V_{BE1}}{R_2}=\frac{1}{R_2}\frac{kT}{q}ln(\frac{I_{IN}}{I_S})
-$$
-
-$$
-S_{V_{DD}}^{I_{OUT}}=\frac{\frac{kT}{q}}{V_{BE}}\ e.g.\ \frac{26mV}{700mV}=3.7\%
-$$
-
-电流变化特别大→Vbe基本不发生变化
-
-### 稳定性问题
-
-电流偏置电路同样为一个环路，会有稳定性问题
-
-![Untitled](IMAGE/Untitled%2020.png)
-
-$$
-T(s)\approx g_{m1}R_1\cdot\frac{g_{m2}R_2}{1+g_{m2}R_2}\cdot\frac{1}{1+\frac{s}{\omega_{p1}}}\cdot\frac{1}{1+\frac{s}{\omega_{p2}}}
-$$
-
-Loop gain greater than 1 at low frequencies, two poles
-
-Means that we must make one of the poles dominant to guarantee sufficient phase margin
-
-- E.g. use large capacitance to ground
-at drain of T1
+      if (mode == 'c') {
+        conn->file = fopen(filename, "w");
+    
+      } else {
+        conn->file = fopen(filename, "r+");
+    
+        if (conn->file) {
+          Database_load(conn);
+        }
+      }
+      if (!conn->file)
+        die("Failed to open the file");
+      return conn;
+    }
+    
+    void Database_close(struct Connection *conn) {
+      if (conn) {
+        if (conn->file)
+          fclose(conn->file);
+        if (conn->db)
+          free(conn->db);
+        free(conn);
+      }
+    }
+    
+    void Database_write(struct Connection *conn) {
+      rewind(conn->file);
+    
+      int rc = fwrite(conn->db, sizeof(struct Database), 1, conn->file);
+      if (rc != 1)
+        die("Failed to write database.");
+    
+      rc = fflush(conn->file);
+      if (rc == -1)
+        die("Cannot flush database");
+    }
+    
+    void Database_create(struct Connection *conn) {
+      int i = 0;
+    
+      for (i = 0; i < MAX_ROWS; i++) {
+        // make a prototype to initialize it
+        struct Address addr = {.id = i, .set = 0};
+        // then just assign it
+        conn->db->rows[i] = addr;
+      }
+    }
+    
+    void Database_set(struct Connection *conn, int id, const char *name,
+                      const char *email) {
+      struct Address *addr = &conn->db->rows[id];
+      if (addr->set)
+        die("Already set, delete it first");
+    
+      addr->set = 1;
+      // WARNING:bug, read the "How To Break It" and fix this
+      char *res = strncpy(addr->name, name, MAX_DATA);
+      // demonstrate the strncpy bug
+      if (!res)
+        die("Name copy failed");
+    
+      res = strncpy(addr->email, email, MAX_DATA);
+      if (!res)
+        die("Email copy failed");
+    }
+    
+    void Database_get(struct Connection *conn, int id) {
+      struct Address *addr = &conn->db->rows[id];
+    
+      if (addr->set) {
+        Address_print(addr);
+      } //else {
+        //die("ID is not set");
+      //}
+    }
+    
+    void Database_delete(struct Connection *conn, int id) {
+      struct Address addr = {.id = id, .set = 0};
+      conn->db->rows[id] = addr;
+    }
+    
+    void Database_list(struct Connection *conn) {
+      int i = 0;
+      struct Database *db = conn->db;
+    
+      for (i = 0; i < MAX_ROWS; i++) {
+        struct Address *cur = &db->rows[i];
+    
+        if (cur->set) {
+          Address_print(cur);
+        }
+      }
+    }
+    
+    int main(int argc, char *argv[]) {
+    
+      if (argc < 3)
+        die("USAGE: ex17 <dbfile><action> [action params]");
+      char *filename = argv[1];
+      char action = argv[2][0];
+      struct Connection *conn = Database_open(filename, action);
+      int id = 0;
+    
+      if (argc > 3)
+        id = atoi(argv[3]);
+      // if (id >= MAX_ROWS)
+      //   die("There is not many records. ");
+    
+      switch (action) {
+      case 'c':
+        Database_create(conn);
+        Database_write(conn);
+        break;
+      case 'g':
+        if (argc != 4)
+          die("Need an id to get");
+    
+        Database_get(conn, id);
+        break;
+      case 's':
+        if (argc != 6)
+          die("Need id, name, email to set. ");
+    
+        Database_set(conn, id, argv[4], argv[5]);
+        Database_write(conn);
+        break;
+      case 'd':
+        if (argc != 4)
+          die("Need id to delete. ");
+    
+        Database_delete(conn, id);
+        Database_write(conn);
+        break;
+      case 'l':
+        Database_list(conn);
+        break;
+      default:
+        die("Invaild action: c=create, g=get, s=set, d=del, l=list");
+      }
+      Database_close(conn);
+    
+      return 0;
+    }
+    ```
+    
+    ```bash
+    #修改前
+    ❯ ./lecture17 db.dat l
+    1 zed zed@shaw.com
+    2 frank frank@zedshaw.com
+    ❯ ./lecture17 db.dat g 3
+    ERROR: ID is not set
+    
+    #修改后
+    ❯ ./lecture17 db.dat g 1
+    1 zed zed@shaw.com
+    
+    ❯ ./lecture17 db.dat g 2
+    2 frank frank@zedshaw.com
+    
+    ❯ ./lecture17 db.dat g 3
+    ```
+    
+- 你还可以试着破坏数据文件。用编辑器打开文件，随机修改其中的字节。然后关闭文件。
+    
+    ```bash
+    ❯ ./ex17 db.dat c
+    ❯ ./ex17 db.dat s 1 zed zed@zedshaw.com
+    ❯ ./ex17 db.dat g 1
+    1 zed zed@zedshaw.com
+    ```
+    
+    破坏之后
+    
+    ```bash
+    ❯ ./lecture17 db.dat g 1
+    ERROR: Failed to load database.
+    ```
