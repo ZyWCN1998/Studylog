@@ -1,4 +1,4 @@
-# 20230827 Learn C the Hardway 18
+# 习题18. 指向函数的指针
 
 根据讲义内容录入代码，编写Makefile文件
 
